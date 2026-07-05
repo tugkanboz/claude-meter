@@ -731,8 +731,8 @@ fn main() -> Result<()> {
     // Persisted snapshots are loaded as "last available" but never trigger the
     // blink on their own. The visual alarm only fires from a FRESH snapshot
     // (Snapshots(Ok) branch). If we're in a 429 window at startup, the user
-    // sees the last known percentages while the poller respects backoff — no
-    // blinking off stale data, no spam from app restarts.
+    // just sees the last known percentages with a "!" marker — no blinking
+    // off stale data, no spam from app restarts.
     let mut last_snaps: Option<Vec<UsageSnapshot>> = if persisted.is_empty() {
         None
     } else {
@@ -901,27 +901,20 @@ fn main() -> Result<()> {
                 }
             }
             Event::UserEvent(AppEvent::Snapshots(Err(e))) => {
-                let has_last_good_snapshot =
-                    last_snaps.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
-                let show_error = should_show_fetch_error(&e, has_last_good_snapshot);
-                if show_error {
-                    last_error = Some(e.clone());
-                } else if last_error.take().is_some() {
-                    dirty = true;
-                }
+                last_error = Some(e.clone());
                 // Only swap to the bare error menu if we have NO last-good
                 // data. With data we keep the regular menu (alarm toggle,
-                // account submenu, etc.). Expected 429 backoffs stay in logs
-                // and do not add a scary title marker when we have cached
-                // usage to show.
-                if show_error && last_snaps.is_none() {
+                // account submenu, etc.) and let apply_title append a "!"
+                // marker so the user still sees usage numbers and can mute
+                // the alarm during a 429 backoff.
+                if last_snaps.is_none() {
                     let (new_menu, new_ids) = build_error_menu(&e);
                     if let Some(tray) = tray_icon.as_ref() {
                         let _ = tray.set_menu(Some(Box::new(new_menu)));
                     }
                     current_ids = new_ids;
                 }
-                dirty |= show_error;
+                dirty = true;
             }
             Event::UserEvent(AppEvent::BlinkTick) => {
                 // Toggle the blink phase and repaint, but only while the
@@ -1108,9 +1101,10 @@ fn apply_title(
     blink: BlinkState,
 ) {
     // Title precedence:
-    //   - have snaps: render them, even if the latest surfaced fetch error is
-    //     still active. Append "!" so the user can tell the data is stale
-    //     without losing the numbers entirely.
+    //   - have snaps: render them, even if the latest fetch errored. Append
+    //     " !" so the user can tell the data is stale without losing the
+    //     numbers entirely (avoids the bare "Claude: !" that hid usage during
+    //     429 backoff).
     //   - no snaps + error: bare "Claude: !" (we have nothing else to show).
     //   - no snaps + no error: "Claude: …" (still loading).
     let mut segs = if let Some(s) = snaps {
@@ -1611,10 +1605,6 @@ fn poll_loop(proxy: EventLoopProxy<AppEvent>, refresh_rx: mpsc::Receiver<()>) {
 /// Heuristic: an HTTP 429 from any of the upstream calls.
 fn is_rate_limit_error(err: &str) -> bool {
     err.contains("429") || err.to_lowercase().contains("too many requests")
-}
-
-fn should_show_fetch_error(err: &str, has_last_good_snapshot: bool) -> bool {
-    !has_last_good_snapshot || !is_rate_limit_error(err)
 }
 
 /// Extract the Retry-After value (seconds) embedded by `oauth::get_json` in
@@ -2343,8 +2333,8 @@ fn title_segments(
     // Fallback: when no fresh snapshot is available (post-restart with only
     // persisted data, or an extended 429 backoff), show the last-known
     // numbers from any stale snapshot rather than the uninformative "—".
-    // The caller may add a " !" suffix for surfaced errors, so the user still
-    // sees "Claude 5h 6% · 7d 1% !" instead of "Claude: — !".
+    // The caller adds a " !" suffix when there's an active error, so the
+    // user still sees "Claude 5h 6% · 7d 1% !" instead of "Claude: — !".
     let live: Vec<&UsageSnapshot> = if !live.is_empty() {
         live
     } else {
@@ -2759,19 +2749,8 @@ mod macos_title {
 
 #[cfg(test)]
 mod tests {
-    use super::{reset_suffix, should_show_fetch_error};
+    use super::reset_suffix;
     use chrono::{Duration, Utc};
-
-    #[test]
-    fn rate_limit_with_cached_snapshot_is_not_visible_error() {
-        assert!(!should_show_fetch_error(
-            "HTTP 429 Too Many Requests from /api/oauth/usage",
-            true
-        ));
-        assert!(!should_show_fetch_error("too many requests", true));
-        assert!(should_show_fetch_error("HTTP 429 Too Many Requests", false));
-        assert!(should_show_fetch_error("network timeout", true));
-    }
 
     #[test]
     fn reset_suffix_buckets() {
