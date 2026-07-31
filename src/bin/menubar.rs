@@ -337,6 +337,30 @@ fn log_capture(level: &str, msg: &str) {
     sentry::capture_message(msg, sentry_level);
 }
 
+/// True when an OAuth fetch error is a credential/keychain-setup problem (a
+/// permanent dead end for the user) rather than a transient rate-limit or
+/// network hiccup. Used to decide whether to raise a queryable Sentry event.
+fn is_credential_error(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    // Transient issues: never escalate these to Sentry events.
+    if m.contains("429")
+        || m.contains("rate limit")
+        || m.contains("timed out")
+        || m.contains("timeout")
+        || m.contains("connect")
+        || m.contains("network")
+        || m.contains("dns")
+    {
+        return false;
+    }
+    m.contains("keychain")
+        || m.contains("credentials json")
+        || m.contains("logged in")
+        || m.contains("oauth token expired")
+        || m.contains("not valid utf-8")
+        || m.contains("claudeaioauth")
+}
+
 /// Smart adaptive polling for /api/oauth/usage. The endpoint is an internal
 /// Anthropic surface with no published rate limit, and our token is also being
 /// hit by the actual Claude Code CLI in parallel, so a fixed cadence is wrong:
@@ -1837,7 +1861,17 @@ fn fetch_all() -> Result<Vec<UsageSnapshot>, String> {
         } else {
             format!("OAuth poll helper exited with {status}: {detail}")
         };
-        log_warn(&format!("oauth fetch failed: {message}"));
+        // Credential/keychain failures (bad JSON shape, missing entry, expired
+        // token, non-UTF8 blob) are onboarding dead ends: the user is stuck on a
+        // permanent "Claude: !" until they fix their Claude Code login. Capture
+        // these as real Sentry events so we can see how many installs hit them
+        // and whether a Claude Code update changed the keychain format. Routine
+        // 429s, network blips, and timeouts stay as breadcrumbs to avoid noise.
+        if is_credential_error(&message) {
+            log_capture("warn", &format!("oauth fetch failed (credentials): {message}"));
+        } else {
+            log_warn(&format!("oauth fetch failed: {message}"));
+        }
         return Err(message);
     }
 
