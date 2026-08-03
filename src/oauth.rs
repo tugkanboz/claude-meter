@@ -71,9 +71,26 @@ pub fn read_token() -> Result<OAuthCreds> {
     }
     let raw =
         String::from_utf8(out.stdout).context("Claude Code keychain blob was not valid UTF-8")?;
-    let blob: KeychainBlob = serde_json::from_str(raw.trim()).with_context(|| {
-        let snippet = &raw[..raw.len().min(80)];
-        format!("parse Claude Code credentials JSON (head: {snippet:?})")
+    let trimmed = raw.trim();
+    let blob: KeychainBlob = serde_json::from_str(trimmed).map_err(|e| {
+        // Common case: the keychain item exists and parses, but has no
+        // `claudeAiOauth` block — only `mcpOAuth` plugin tokens. That means
+        // Claude Code is installed but the user never logged in with a Claude
+        // Pro/Max subscription (they're on an API key, or only configured MCP
+        // plugins). Surface a plain-English message instead of raw serde noise.
+        if e.to_string().contains("missing field `claudeAiOauth`")
+            && trimmed.contains("\"mcpOAuth\"")
+        {
+            anyhow::anyhow!(
+                "Claude Code is installed but not logged into a Claude Pro/Max subscription. \
+                 Run `claude` in Terminal and choose \"Log in with your Claude account\" \
+                 (not an API key), then click Refresh now."
+            )
+        } else {
+            let snippet = &raw[..raw.len().min(80)];
+            anyhow::Error::new(e)
+                .context(format!("parse Claude Code credentials JSON (head: {snippet:?})"))
+        }
     })?;
     Ok(blob.oauth)
 }
