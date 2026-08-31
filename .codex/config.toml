@@ -1,0 +1,2 @@
+[mcp_servers.macos-use-remote]
+command = "/Users/matthewdi/fazm/scripts/macstadium/macos-use-remote.sh"
