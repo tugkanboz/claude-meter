@@ -18,6 +18,49 @@ brew install --cask m13v/tap/claude-meter
 
 That's it. The menu-bar app launches and starts showing your usage. On first launch macOS may ask to read the **`Claude Code-credentials`** keychain item; click **Always Allow**. That item is just Claude Code's OAuth token, not your browser's cookies or passwords.
 
+## Multiple accounts
+
+The default installation still reads only the normal Claude Code credential and
+does not change `~/.claude`. To monitor additional accounts, create
+`~/Library/Application Support/ClaudeMeter/accounts.json` (the location
+returned by `dirs::config_dir()` on macOS) with read-only credential references:
+
+```json
+[
+  {
+    "label": "Personal",
+    "keychain_service": "Claude Code-credentials"
+  },
+  {
+    "label": "Work",
+    "keychain_service": "Claude Code-credentials-work"
+  },
+  {
+    "label": "Side projects",
+    "credentials_file": "/Users/you/.claude-accounts/side/.credentials.json"
+  }
+]
+```
+
+When multiple generic-password items share a service name, add
+`"keychain_account"` to select the exact item. ClaudeMeter only reads these
+credentials; it never writes, rotates, logs out, or copies them. The existing
+default Claude Code configuration remains untouched.
+
+Each configured account appears as a separate row in the menu and as a separate
+segment in the menu-bar title. A failed or expired account does not prevent the
+other accounts from refreshing.
+
+The CLI accepts the same source options for diagnostics:
+
+```bash
+claude-meter --json --label Work \
+  --keychain-service Claude\ Code-credentials-work
+
+claude-meter --json --label Side \
+  --credentials-file "$HOME/.claude-accounts/side/.credentials.json"
+```
+
 ## Privacy
 
 - Usage data stays local: the OAuth token, account email, org ID, and Claude
