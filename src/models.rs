@@ -61,6 +61,11 @@ pub struct SubscriptionResponse {
 pub struct UsageSnapshot {
     pub org_uuid: String,
     pub browser: String,
+    /// Optional user-defined name for a credential source. This lets the
+    /// menu-bar distinguish multiple Claude accounts without changing either
+    /// account's Claude Code configuration.
+    #[serde(default)]
+    pub source_label: Option<String>,
     pub account_email: Option<String>,
     pub fetched_at: chrono::DateTime<chrono::Utc>,
     pub usage: Option<UsageResponse>,

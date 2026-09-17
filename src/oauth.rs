@@ -19,8 +19,8 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rquest::Client;
-use serde::Deserialize;
-use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use std::{path::PathBuf, time::Duration};
 
 use crate::models::{UsageResponse, UsageSnapshot};
 
@@ -28,6 +28,21 @@ const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 const API_BASE: &str = "https://api.anthropic.com";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A read-only reference to one Claude Code credential. When no fields other
+/// than `label` are set, the normal `Claude Code-credentials` keychain item is
+/// used, preserving the historical single-account behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CredentialSource {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub keychain_service: Option<String>,
+    #[serde(default)]
+    pub keychain_account: Option<String>,
+    #[serde(default)]
+    pub credentials_file: Option<PathBuf>,
+}
 
 /// What the keychain blob looks like:
 /// ```json
@@ -59,18 +74,36 @@ pub struct OAuthCreds {
 }
 
 pub fn read_token() -> Result<OAuthCreds> {
-    let out = std::process::Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
-        .output()
-        .context("spawn /usr/bin/security")?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "`security find-generic-password -s \"{KEYCHAIN_SERVICE}\"` failed: {}. Is Claude Code logged in?",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let raw =
-        String::from_utf8(out.stdout).context("Claude Code keychain blob was not valid UTF-8")?;
+    read_token_from(&CredentialSource::default())
+}
+
+pub fn read_token_from(source: &CredentialSource) -> Result<OAuthCreds> {
+    let raw = if let Some(path) = source.credentials_file.as_ref() {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("read credentials file {}", path.display()))?
+    } else {
+        let service = source
+            .keychain_service
+            .as_deref()
+            .unwrap_or(KEYCHAIN_SERVICE);
+        let mut command = std::process::Command::new("/usr/bin/security");
+        command.args(["find-generic-password", "-s", service]);
+        if let Some(account) = source.keychain_account.as_deref() {
+            command.args(["-a", account]);
+        }
+        let out = command
+            .arg("-w")
+            .output()
+            .context("spawn /usr/bin/security")?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "Keychain lookup failed for service {service:?}, account {:?}: {}. Is this Claude Code profile logged in?",
+                source.keychain_account,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        String::from_utf8(out.stdout).context("Claude Code keychain blob was not valid UTF-8")?
+    };
     let trimmed = raw.trim();
     let blob: KeychainBlob = serde_json::from_str(trimmed).map_err(|e| {
         // Common case: the keychain item exists and parses, but has no
@@ -112,7 +145,11 @@ struct ProfileOrg {
 }
 
 pub async fn fetch_oauth_snapshot() -> Result<UsageSnapshot> {
-    let creds = read_token().context("read OAuth token from Keychain")?;
+    fetch_oauth_snapshot_from(&CredentialSource::default()).await
+}
+
+pub async fn fetch_oauth_snapshot_from(source: &CredentialSource) -> Result<UsageSnapshot> {
+    let creds = read_token_from(source).context("read OAuth token")?;
 
     let now_ms = Utc::now().timestamp_millis();
     if creds.expires_at > 0 && creds.expires_at < now_ms {
@@ -147,6 +184,7 @@ pub async fn fetch_oauth_snapshot() -> Result<UsageSnapshot> {
     Ok(UsageSnapshot {
         org_uuid: profile.organization.uuid,
         browser: "Claude Code".to_string(),
+        source_label: source.label.clone(),
         account_email: profile.account.email,
         fetched_at: Utc::now(),
         usage: Some(usage),
