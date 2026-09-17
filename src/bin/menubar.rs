@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, Local};
-use claude_meter::{models::UsageSnapshot, oauth};
+use claude_meter::{
+    models::UsageSnapshot,
+    oauth::{self, CredentialSource},
+};
 use serde::{Deserialize, Serialize};
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -539,6 +542,29 @@ fn keep_active_only(snaps: Vec<UsageSnapshot>) -> Vec<UsageSnapshot> {
         .into_iter()
         .filter(|s| s.browser == OAUTH_BROWSER_TAG)
         .collect()
+}
+
+fn accounts_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|p| p.join("ClaudeMeter").join("accounts.json"))
+}
+
+/// Load optional read-only credential references. Missing configuration keeps
+/// the original single-account behavior exactly as-is.
+fn load_credential_sources() -> Vec<CredentialSource> {
+    let Some(path) = accounts_path() else {
+        return vec![CredentialSource::default()];
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return vec![CredentialSource::default()];
+    };
+    match serde_json::from_str::<Vec<CredentialSource>>(&raw) {
+        Ok(sources) if !sources.is_empty() => sources,
+        Ok(_) => vec![CredentialSource::default()],
+        Err(e) => {
+            log_warn(&format!("could not parse {}: {e}", path.display()));
+            vec![CredentialSource::default()]
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1815,8 +1841,45 @@ fn fetch_all() -> Result<Vec<UsageSnapshot>, String> {
     let helper = std::env::current_exe()
         .map_err(|e| format!("locate menubar executable: {e}"))?
         .with_file_name("claude-meter");
-    let mut child = Command::new(&helper)
-        .arg("--json")
+    let mut snapshots = Vec::new();
+    let mut errors = Vec::new();
+
+    for source in load_credential_sources() {
+        match fetch_source_with_helper(&helper, &source) {
+            Ok(snapshot) => snapshots.push(snapshot),
+            Err(e) => errors.push(e),
+        }
+    }
+
+    if snapshots.is_empty() {
+        Err(errors.join("; "))
+    } else {
+        for error in errors {
+            log_warn(&format!("one account failed to refresh: {error}"));
+        }
+        Ok(snapshots)
+    }
+}
+
+fn fetch_source_with_helper(
+    helper: &std::path::Path,
+    source: &CredentialSource,
+) -> Result<UsageSnapshot, String> {
+    let mut command = Command::new(helper);
+    command.arg("--json");
+    if let Some(value) = source.label.as_deref() {
+        command.args(["--label", value]);
+    }
+    if let Some(value) = source.keychain_service.as_deref() {
+        command.args(["--keychain-service", value]);
+    }
+    if let Some(value) = source.keychain_account.as_deref() {
+        command.args(["--keychain-account", value]);
+    }
+    if let Some(value) = source.credentials_file.as_ref() {
+        command.arg("--credentials-file").arg(value);
+    }
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1877,7 +1940,7 @@ fn fetch_all() -> Result<Vec<UsageSnapshot>, String> {
 
     let snapshot: UsageSnapshot =
         serde_json::from_str(&stdout).map_err(|e| format!("parse OAuth poll helper JSON: {e}"))?;
-    Ok(vec![snapshot])
+    Ok(snapshot)
 }
 
 struct MenuIds {
@@ -2097,7 +2160,11 @@ fn disabled(text: &str) -> MenuItem {
 }
 
 fn account_label(s: &UsageSnapshot) -> String {
-    let who = s.account_email.as_deref().unwrap_or("(unknown)");
+    let who = s
+        .source_label
+        .as_deref()
+        .or(s.account_email.as_deref())
+        .unwrap_or("(unknown)");
     let five = util_five(s);
     let seven = util_seven(s);
     let browser = pretty_browser(&s.browser);
@@ -2139,7 +2206,10 @@ fn pretty_browser(b: &str) -> &str {
 }
 
 fn account_key(s: &UsageSnapshot) -> &str {
-    s.account_email.as_deref().unwrap_or(s.org_uuid.as_str())
+    s.source_label
+        .as_deref()
+        .or(s.account_email.as_deref())
+        .unwrap_or(s.org_uuid.as_str())
 }
 
 fn short_last_seen(t: chrono::DateTime<chrono::Utc>) -> String {
@@ -2316,8 +2386,9 @@ fn bg_for(util: f64) -> Option<(u8, u8, u8)> {
 
 fn account_tag(s: &UsageSnapshot) -> String {
     match s
-        .account_email
+        .source_label
         .as_deref()
+        .or(s.account_email.as_deref())
         .and_then(|e| e.chars().next())
         .map(|c| c.to_ascii_uppercase().to_string())
     {
